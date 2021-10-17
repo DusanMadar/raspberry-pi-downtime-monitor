@@ -43,8 +43,9 @@ class DowntimeMonitor:
 
     def log_downtime(self) -> None:
         logger.warning(
-            f"{self.TARGET} down between {self.last_heartbeat.isoformat()} "
-            f"and {self.following_heartbeat.isoformat()}"
+            f"{self.TARGET} down between "
+            f"{self.last_heartbeat.isoformat(timespec='seconds')} and "
+            f"{self.following_heartbeat.isoformat(timespec='seconds')}"
         )
 
 
