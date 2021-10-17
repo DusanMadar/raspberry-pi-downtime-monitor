@@ -3,39 +3,22 @@ from datetime import datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+import random
+import subprocess
 from time import sleep
 from typing import Optional
 
 import psutil
 
+
 logger = logging.getLogger(__name__)
 
 
 class DowntimeMonitor:
-    def __init__(self, data_dir: str, heartbeat_interval: int) -> None:
-        self.data_dir = data_dir
-        self.heartbeat_interval = heartbeat_interval
-        self.heartbeat_path = Path(self.data_dir).joinpath("heartbeat.txt")
-        self.downtime_log_path = Path(self.data_dir).joinpath("downtime.log")
+    TARGET = ""
 
-    def prepare(self):
-        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
-
-        self.prepare_logger()
-
-    def prepare_logger(self):
-        handler = TimedRotatingFileHandler(
-            self.downtime_log_path, when="midnight", interval=1
-        )
-        handler.suffix = "%Y-%m-%d"
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
-        )
-        logger.addHandler(handler)
-
-    def heartbeat(self):
-        with open(self.heartbeat_path, "w+") as fd:
-            fd.write(datetime.now().isoformat(timespec="seconds"))
+    def __init__(self, data_dir: str) -> None:
+        self.heartbeat_path = Path(data_dir).joinpath(f"heartbeat-{self.TARGET}.txt")
 
     @property
     def last_heartbeat(self) -> Optional[datetime]:
@@ -51,20 +34,57 @@ class DowntimeMonitor:
         return datetime.fromisoformat(last_heartbeat)
 
     @property
-    def boot_time(self) -> datetime:
+    def following_heartbeat(self) -> datetime:
+        return datetime.now()
+
+    def heartbeat(self) -> None:
+        with open(self.heartbeat_path, "w+") as fd:
+            fd.write(datetime.now().isoformat(timespec="seconds"))
+
+    def log_downtime(self) -> None:
+        logger.warning(
+            f"{self.TARGET} down between {self.last_heartbeat.isoformat()} "
+            f"and {self.following_heartbeat.isoformat()}"
+        )
+
+
+class SystemDowntimeMonitor(DowntimeMonitor):
+    TARGET = "system"
+
+    @property
+    def following_heartbeat(self) -> datetime:
         return datetime.fromtimestamp(psutil.boot_time())
 
-    def log_downtime(self):
-        if self.last_heartbeat:
-            logger.warning(
-                f"down between {self.last_heartbeat.isoformat()} "
-                f"and {self.boot_time.isoformat()}"
-            )
 
-    def watch_uptime(self) -> None:
-        while True:
-            self.heartbeat()
-            sleep(self.heartbeat_interval)
+class InternetDowntimeMonitor(DowntimeMonitor):
+    TARGET = "internet"
+
+    def __init__(self, data_dir: str) -> None:
+        super().__init__(data_dir)
+        self.internet_previously_down = True
+
+    def heartbeat(self) -> None:
+        if self.is_internet_up():
+            if self.internet_previously_down and self.last_heartbeat:
+                self.log_downtime()
+
+            super().heartbeat()
+            self.internet_previously_down = False
+        else:
+            self.internet_previously_down = True
+
+    def is_internet_up(self) -> bool:
+        host = random.choice(("1.1.1.1", "8.8.8.8"))
+        return not bool(subprocess.run(["ping", host, "-c1", "-w1"]).returncode)
+
+
+def prepare_logger(path: str) -> None:
+    handler = TimedRotatingFileHandler(path, when="midnight", interval=1)
+    handler.suffix = "%Y-%m-%d"
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
+    )
+    logger.addHandler(handler)
 
 
 def get_arg_parser() -> argparse.ArgumentParser:
@@ -76,14 +96,24 @@ def get_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
+def main() -> None:
     parser = get_arg_parser()
     args = parser.parse_args()
 
-    downtime_monitor = DowntimeMonitor(args.data_dir, args.heartbeat_interval)
-    downtime_monitor.prepare()
-    downtime_monitor.log_downtime()
-    downtime_monitor.watch_uptime()
+    Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+    prepare_logger(Path(args.data_dir).joinpath("downtime.log"))
+
+    system_downtime_monitor = SystemDowntimeMonitor(args.data_dir)
+    if system_downtime_monitor.last_heartbeat:
+        system_downtime_monitor.log_downtime()
+
+    internet_downtime_monitor = InternetDowntimeMonitor(args.data_dir)
+
+    while True:
+        system_downtime_monitor.heartbeat()
+        internet_downtime_monitor.heartbeat()
+
+        sleep(args.heartbeat_interval)
 
 
 if __name__ == "__main__":
