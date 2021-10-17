@@ -65,6 +65,10 @@ class InternetDowntimeMonitor(DowntimeMonitor):
         self.internet_previously_down = True
 
     def heartbeat(self) -> None:
+        """
+        Internet can go down while Rpi continues to carry on and thus we need to log
+        downtime as soon as it's over.
+        """
         if self.is_internet_up():
             if self.internet_previously_down and self.last_heartbeat:
                 self.log_downtime()
