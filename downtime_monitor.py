@@ -85,7 +85,6 @@ class InternetDowntimeMonitor(DowntimeMonitor):
 
 def prepare_logger(path: str) -> None:
     handler = TimedRotatingFileHandler(path, when="midnight", interval=1)
-    handler.suffix = "%Y-%m-%d"
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
     )
