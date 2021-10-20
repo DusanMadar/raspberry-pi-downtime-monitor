@@ -1,11 +1,10 @@
 import argparse
+import asyncio
 from datetime import datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 import random
-import subprocess
-from time import sleep
 from typing import Optional
 
 import psutil
@@ -17,7 +16,8 @@ logger = logging.getLogger(__name__)
 class DowntimeMonitor:
     TARGET = ""
 
-    def __init__(self, data_dir: str) -> None:
+    def __init__(self, heartbeat_interval: int, data_dir: str) -> None:
+        self.heartbeat_interval = heartbeat_interval
         self.heartbeat_path = Path(data_dir).joinpath(f"heartbeat-{self.TARGET}.txt")
 
     @property
@@ -37,7 +37,7 @@ class DowntimeMonitor:
     def following_heartbeat(self) -> datetime:
         return datetime.now()
 
-    def heartbeat(self) -> None:
+    async def heartbeat(self) -> None:
         with open(self.heartbeat_path, "w+") as fd:
             fd.write(datetime.now().isoformat(timespec="seconds"))
 
@@ -47,6 +47,11 @@ class DowntimeMonitor:
             f"{self.last_heartbeat.isoformat(timespec='seconds')} and "
             f"{self.following_heartbeat.isoformat(timespec='seconds')}"
         )
+
+    async def run(self):
+        while True:
+            await self.heartbeat()
+            await asyncio.sleep(self.heartbeat_interval)
 
 
 class SystemDowntimeMonitor(DowntimeMonitor):
@@ -60,27 +65,41 @@ class SystemDowntimeMonitor(DowntimeMonitor):
 class InternetDowntimeMonitor(DowntimeMonitor):
     TARGET = "internet"
 
-    def __init__(self, data_dir: str) -> None:
-        super().__init__(data_dir)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.internet_previously_down = True
 
-    def heartbeat(self) -> None:
+    async def heartbeat(self) -> None:
         """
         Internet can go down while Rpi continues to carry on and thus we need to log
         downtime as soon as it's over.
         """
-        if self.is_internet_up():
+        if await self.is_internet_up():
             if self.internet_previously_down and self.last_heartbeat:
                 self.log_downtime()
 
-            super().heartbeat()
+            await super().heartbeat()
             self.internet_previously_down = False
         else:
             self.internet_previously_down = True
 
-    def is_internet_up(self) -> bool:
+    async def is_internet_up(self) -> bool:
+        for _ in range(5):
+            ping = await self.ping()
+            if ping.returncode == 0:
+                return True
+
+        return False
+
+    async def ping(self) -> asyncio.subprocess.Process:
         host = random.choice(("1.1.1.1", "8.8.8.8"))
-        return not bool(subprocess.run(["ping", host, "-c1", "-w1"]).returncode)
+        proc = await asyncio.create_subprocess_shell(
+            f"ping {host} -c1 -w1",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        return proc
 
 
 def prepare_logger(path: str) -> None:
@@ -100,25 +119,26 @@ def get_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+async def main() -> None:
     parser = get_arg_parser()
     args = parser.parse_args()
 
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
     prepare_logger(Path(args.data_dir).joinpath("downtime.log"))
 
-    system_downtime_monitor = SystemDowntimeMonitor(args.data_dir)
+    system_downtime_monitor = SystemDowntimeMonitor(
+        args.heartbeat_interval, args.data_dir
+    )
     if system_downtime_monitor.last_heartbeat:
         system_downtime_monitor.log_downtime()
 
-    internet_downtime_monitor = InternetDowntimeMonitor(args.data_dir)
+    internet_downtime_monitor = InternetDowntimeMonitor(
+        args.heartbeat_interval, args.data_dir
+    )
 
-    while True:
-        system_downtime_monitor.heartbeat()
-        internet_downtime_monitor.heartbeat()
-
-        sleep(args.heartbeat_interval)
+    await asyncio.gather(system_downtime_monitor.run(), internet_downtime_monitor.run())
 
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
